@@ -1,0 +1,7 @@
+python train.py --data data/en-fr/sp --source-lang fr --target-lang en --save-dir assignments/03/bpe_model --cuda --bpe --batch-size 8
+python train.py --data data/en-fr/sp_all --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all --cuda --bpe --batch-size 8
+python train.py --data data/en-fr/sp_all_2k --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all_2k --cuda --bpe --log-file=assignments/03/bpe_model_all_2k.log --batch-size 8
+# python train.py --data data/en-fr/sp_all_4k --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all_4k --cuda --bpe --log-file=assignments/03/bpe_model_all_4k.log --batch-size 8
+python train.py --data data/en-fr/sp_all_8k --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all_8k --cuda --bpe --log-file=assignments/03/bpe_model_all_8k.log --batch-size 8
+# python train.py --data data/en-fr/sp_all_16k --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all_16k --cuda --bpe --log-file=assignments/03/bpe_model_all_16k.log --batch-size 8
+# python train.py --data data/en-fr/sp_all_32k --source-lang fr --target-lang en --save-dir assignments/03/bpe_model_all_32k --cuda --bpe --log-file=assignments/03/bpe_model_all_32k.log --batch-size 8

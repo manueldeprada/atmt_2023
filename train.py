@@ -10,7 +10,8 @@ import torch.nn as nn
 
 from seq2seq import models, utils
 from seq2seq.data.dictionary import Dictionary
-from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
+from seq2seq.data.bpe_dict import BPEDictionary
+from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler, TextDataset
 from seq2seq.models import ARCH_MODEL_REGISTRY, ARCH_CONFIG_REGISTRY
 
 def get_args():
@@ -20,6 +21,7 @@ def get_args():
 
     # Add data arguments
     parser.add_argument('--data', default='indomain/preprocessed_data/', help='path to data directory')
+    parser.add_argument('--dicts', default=None, help='path to directory containing dictionaries')
     parser.add_argument('--source-lang', default='fr', help='source language')
     parser.add_argument('--target-lang', default='en', help='target language')
     parser.add_argument('--max-tokens', default=None, type=int, help='maximum number of tokens in a batch')
@@ -28,6 +30,8 @@ def get_args():
 
     # Add model arguments
     parser.add_argument('--arch', default='lstm', choices=ARCH_MODEL_REGISTRY.keys(), help='model architecture')
+    parser.add_argument('--bpe', action='store_true', help='use byte pair encoding')
+    parser.add_argument('--bpe-dropout', default=0.0, type=float, help='dropout applied to BPE embeddings')
 
     # Add optimization arguments
     parser.add_argument('--max-epoch', default=10000, type=int, help='force stop training at specified epoch')
@@ -63,14 +67,22 @@ def main(args):
     utils.init_logging(args)
 
     # Load dictionaries
-    src_dict = Dictionary.load(os.path.join(args.data, 'dict.{:s}'.format(args.source_lang)))
+    if args.dicts is None:
+        args.dicts = args.data
+    dict_cls = BPEDictionary if args.bpe else Dictionary
+    src_dict = dict_cls.load(os.path.join(args.dicts, '{:s}.model'.format(args.source_lang)))
     logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
-    tgt_dict = Dictionary.load(os.path.join(args.data, 'dict.{:s}'.format(args.target_lang)))
+    tgt_dict = dict_cls.load(os.path.join(args.dicts, '{:s}.model'.format(args.target_lang)))
     logging.info('Loaded a target dictionary ({:s}) with {:d} words'.format(args.target_lang, len(tgt_dict)))
+    if args.bpe_dropout > 0:
+        src_dict.alpha = args.bpe_dropout
+        tgt_dict.alpha = args.bpe_dropout
+
+    dataset_cls = Seq2SeqDataset if args.bpe_dropout == 0.0 else TextDataset
 
     # Load datasets
     def load_data(split):
-        return Seq2SeqDataset(
+        return dataset_cls(
             src_file=os.path.join(args.data, '{:s}.{:s}'.format(split, args.source_lang)),
             tgt_file=os.path.join(args.data, '{:s}.{:s}'.format(split, args.target_lang)),
             src_dict=src_dict, tgt_dict=tgt_dict)
@@ -168,6 +180,7 @@ def main(args):
         if bad_epochs >= args.patience:
             logging.info('No validation set improvements observed for {:d} epochs. Early stop!'.format(args.patience))
             break
+    
 
 
 def validate(args, model, criterion, valid_dataset, epoch):

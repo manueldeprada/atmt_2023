@@ -7,6 +7,65 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
 
+class TextDataset(Dataset):
+    def __init__(self, src_file, tgt_file, src_dict, tgt_dict):
+        self.src_tok, self.tgt_tok = src_dict, tgt_dict
+        with open(src_file, 'r') as f:
+            self.src_dataset = [line.strip() for line in f]
+            self.src_sizes = np.array([len(sent) for sent in self.src_dataset])
+
+        with open(tgt_file, 'r') as f:
+            self.tgt_dataset = [line.strip() for line in f]
+            self.tgt_sizes = np.array([len(sent) for sent in self.tgt_dataset])
+
+    def __getitem__(self, index):
+        return {
+            'id': index,
+            'source': self.src_tok.binarize(self.src_dataset[index], self.src_tok),
+            'target': self.tgt_tok.binarize(self.tgt_dataset[index], self.tgt_tok),
+        }
+
+    def __len__(self):
+        return len(self.src_dataset)
+
+    def collater(self, samples):
+        """Merge a list of samples to form a mini-batch."""
+        if len(samples) == 0:
+            return {}
+        def merge(values, move_eos_to_beginning=False):
+            max_length = max(v.size(0) for v in values)
+            result = values[0].new(len(values), max_length).fill_(self.src_tok.pad_idx)
+            for i, v in enumerate(values):
+                if move_eos_to_beginning:
+                    assert v[-1] == self.src_tok.eos_idx
+                    result[i, 0] = self.src_tok.eos_idx
+                    result[i, 1:len(v)] = v[:-1]
+                else:
+                    result[i, :len(v)].copy_(v)
+            return result
+
+        id = torch.LongTensor([s['id'] for s in samples])
+        src_tokens = merge([s['source'] for s in samples])
+        tgt_tokens = merge([s['target'] for s in samples])
+        tgt_inputs = merge([s['target'] for s in samples], move_eos_to_beginning=True)
+
+        # Sort by descending source length
+        src_lengths = torch.LongTensor([s['source'].numel() for s in samples])
+        src_lengths, sort_order = src_lengths.sort(descending=True)
+        id = id.index_select(0, sort_order)
+        src_tokens = src_tokens.index_select(0, sort_order)
+        tgt_tokens = tgt_tokens.index_select(0, sort_order)
+        tgt_inputs = tgt_inputs.index_select(0, sort_order)
+
+        return {
+            'id': id,
+            'src_tokens': src_tokens,
+            'src_lengths': src_lengths,
+            'tgt_tokens': tgt_tokens,
+            'tgt_inputs': tgt_inputs,
+            'num_tokens': sum(len(s['target']) for s in samples),
+        }
+
 
 class Seq2SeqDataset(Dataset):
     def __init__(self, src_file, tgt_file, src_dict, tgt_dict):

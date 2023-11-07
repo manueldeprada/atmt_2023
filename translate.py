@@ -9,6 +9,7 @@ from torch.serialization import default_restore_location
 
 from seq2seq import models, utils
 from seq2seq.data.dictionary import Dictionary
+from seq2seq.data.bpe_dict import BPEDictionary
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
 
 
@@ -17,6 +18,7 @@ def get_args():
     parser = argparse.ArgumentParser('Sequence to Sequence Model')
     parser.add_argument('--cuda', action='store_true', help='Use a GPU')
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
+    parser.add_argument('--bpe', action='store_true', help='use byte-pair encoding')
 
     # Add data arguments
     parser.add_argument('--data', required=True, help='path to data directory')
@@ -39,9 +41,10 @@ def main(args):
     utils.init_logging(args)
 
     # Load dictionaries
-    src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
+    dict_cls = BPEDictionary if args.bpe else Dictionary
+    src_dict = dict_cls.load(os.path.join(args.dicts, '{:s}.model'.format(args.source_lang)))
     logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
-    tgt_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.target_lang)))
+    tgt_dict = dict_cls.load(os.path.join(args.dicts, '{:s}.model'.format(args.target_lang)))
     logging.info('Loaded a target dictionary ({:s}) with {:d} words'.format(args.target_lang, len(tgt_dict)))
 
     # Load dataset
