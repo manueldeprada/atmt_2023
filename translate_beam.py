@@ -8,6 +8,7 @@ import torch
 from torch.serialization import default_restore_location
 
 from seq2seq import models, utils
+from seq2seq.data.bpe_dict import BPEDictionary
 from seq2seq.data.dictionary import Dictionary
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
 from seq2seq.beam import BeamSearch, BeamSearchNode
@@ -21,17 +22,21 @@ def get_args():
 
     # Add data arguments
     parser.add_argument('--data', default='assignments/03/prepared', help='path to data directory')
+    parser.add_argument('--bpe', action='store_true', help='use byte-pair encoding')
     parser.add_argument('--dicts', required=True, help='path to directory containing source and target dictionaries')
     parser.add_argument('--checkpoint-path', default='checkpoints_asg4/checkpoint_best.pt', help='path to the model file')
     parser.add_argument('--batch-size', default=None, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', default='model_translations.txt', type=str,
                         help='path to the output file destination')
     parser.add_argument('--max-len', default=100, type=int, help='maximum length of generated sequence')
+    parser.add_argument('--output-best', default=3, type=int, help='number of best hypotheses to output')
 
     # Add beam search arguments
     parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
     # alpha hyperparameter for length normalization (described as lp in https://arxiv.org/pdf/1609.08144.pdf equation 14)
     parser.add_argument('--alpha', default=0.0, type=float, help='alpha for softer length normalization')
+    parser.add_argument('--lambda_sq', default=0.0, type=float, help='lambda for square normalization')
+    parser.add_argument('--gamma', default=0.0, type=float, help='gamma for diverse beam search')
 
     return parser.parse_args()
 
@@ -46,9 +51,17 @@ def main(args):
     utils.init_logging(args)
 
     # Load dictionaries
-    src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
+    if args.bpe:
+        dict_cls = BPEDictionary
+        model_path_src = os.path.join(args.dicts, '{:s}.model'.format(args.source_lang))
+        model_path_tgt = os.path.join(args.dicts, '{:s}.model'.format(args.target_lang))
+    else:
+        dict_cls = Dictionary
+        model_path_src = os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang))
+        model_path_tgt = os.path.join(args.dicts, 'dict.{:s}'.format(args.target_lang))
+    src_dict = dict_cls.load(model_path_src)
     logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
-    tgt_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.target_lang)))
+    tgt_dict = dict_cls.load(model_path_tgt)
     logging.info('Loaded a target dictionary ({:s}) with {:d} words'.format(args.target_lang, len(tgt_dict)))
 
     # Load dataset
@@ -68,7 +81,12 @@ def main(args):
     model.eval()
     model.load_state_dict(state_dict['model'])
     logging.info('Loaded a model from checkpoint {:s}'.format(args.checkpoint_path))
-    progress_bar = tqdm(test_loader, desc='| Generation', leave=False)
+    progress_bar = tqdm(test_loader, desc='| Generation', leave=True)
+    
+    diverse_penalty =args.gamma *  torch.tensor(list(range(1, args.beam_size+2))).float()
+    if args.cuda:
+        diverse_penalty = diverse_penalty.cuda()
+
 
     # Iterate over the test set
     all_hyps = {}
@@ -82,8 +100,7 @@ def main(args):
             # Compute the encoder output
             encoder_out = model.encoder(sample['src_tokens'], sample['src_lengths'])
             # __QUESTION 1: What is "go_slice" used for and what do its dimensions represent?
-            go_slice = \
-                torch.ones(sample['src_tokens'].shape[0], 1).fill_(tgt_dict.eos_idx).type_as(sample['src_tokens'])
+            go_slice = torch.ones(sample['src_tokens'].shape[0], 1).fill_(tgt_dict.eos_idx).type_as(sample['src_tokens'])
             if args.cuda:
                 go_slice = utils.move_to_cuda(go_slice)
 
@@ -93,8 +110,10 @@ def main(args):
             decoder_out, _ = model.decoder(go_slice, encoder_out)
 
             # __QUESTION 2: Why do we keep one top candidate more than the beam size?
-            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)),
-                                                    args.beam_size+1, dim=-1)
+            log_ps = torch.log(torch.softmax(decoder_out, dim=2))
+            log_ps = log_ps - args.lambda_sq * log_ps**2
+            log_probs, next_candidates = torch.topk(log_ps, args.beam_size+1, dim=-1)
+            log_probs = log_probs - diverse_penalty
 
         # Create number of beam_size beam search nodes for every input sentence
         for i in range(batch_size):
@@ -132,7 +151,7 @@ def main(args):
                 break # All beams ended in EOS
 
             # Reconstruct prev_words, encoder_out from current beam search nodes
-            prev_words = torch.stack([node.sequence for node in nodes])
+            prev_words = torch.stack([node.sequence for node in nodes]) #shape (beam_size*batch_size, length)
             encoder_out["src_embeddings"] = torch.stack([node.emb for node in nodes], dim=1)
             lstm_out = torch.stack([node.lstm_out for node in nodes], dim=1)
             final_hidden = torch.stack([node.final_hidden for node in nodes], dim=1)
@@ -145,10 +164,14 @@ def main(args):
 
             with torch.no_grad():
                 # Compute the decoder output by feeding it the decoded sentence prefix
-                decoder_out, _ = model.decoder(prev_words, encoder_out)
+                decoder_out, _ = model.decoder(prev_words, encoder_out) # shape (beam_size*batch_size, length, vocab_size)
 
             # see __QUESTION 2
-            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), args.beam_size+1, dim=-1)
+            log_ps = torch.log(torch.softmax(decoder_out, dim=2)) # shape (beam_size*batch_size, length, vocab_size)
+            log_ps = log_ps - args.lambda_sq * log_ps**2
+            log_probs, next_candidates = torch.topk(log_ps, args.beam_size+1, dim=-1) 
+            # log_probs shape: (beam_size*batch_size, length, beam_size+1)
+            
 
             # Create number of beam_size next nodes for every current node
             for i in range(log_probs.shape[0]):
@@ -195,11 +218,23 @@ def main(args):
                 search.prune()
 
         # Segment into sentences
-        best_sents = torch.stack([search.get_best()[1].sequence[1:].cpu() for search in searches])
-        decoded_batch = best_sents.numpy()
+        best_nodes = [search.get_best(args.output_best) for search in searches]
+        best_seqs = []
+        for list_nodes in best_nodes:
+            seq_list = [node.sequence[1:].cpu() for node in list_nodes]
+            best_seqs.append(seq_list)
+        #stack into tensor of dim (batch_size, output_best, length)
+        best_seqs = torch.stack([torch.stack(seq_list) for seq_list in best_seqs], dim=0)
+        # best_seqs = torch.stack([node.sequence[1:].cpu() for list_nodes in best_nodes])
+        
+        #flat list of dim (batch_size*output_best, length)
+        best_seqs = best_seqs.view(-1, best_seqs.shape[-1])
+        
+        decoded_batch = best_seqs.numpy()
         #import pdb;pdb.set_trace()
 
         output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
+        
 
         # __QUESTION 6: What is the purpose of this for loop?
         temp = list()
@@ -213,8 +248,14 @@ def main(args):
 
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
+        
+        #convert back list of strings into list[list[str]] of dim (batch_size, output_best)
+        output_sentences = [output_sentences[i:i+args.output_best] for i in range(0, len(output_sentences), args.output_best)]       
+        
 
         for ii, sent in enumerate(output_sentences):
+            if isinstance(sent, list) and len(sent) == 1:
+                sent = sent[0]
             all_hyps[int(sample['id'].data[ii])] = sent
 
 
@@ -222,7 +263,9 @@ def main(args):
     if args.output is not None:
         with open(args.output, 'w') as out_file:
             for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+                out_file.write(str(all_hyps[sent_id]) + '\n')
+                
+    return progress_bar.format_dict['elapsed']
 
 
 if __name__ == '__main__':
